@@ -27,9 +27,28 @@ def leer_imagen_fitness():
         imagen = Image.open(io.BytesIO(archivo.read()))
         modelo = genai.GenerativeModel('gemini-2.5-flash')
         
-        prompt = """Extrae las métricas de esta imagen de fitness y devuelve SOLO un JSON:
-        { "duracionMinutos": int, "distanciaKm": float, "frecuenciaCardiacaMedia": int, 
-          "nombreEjercicio": "string", "ejerciciosRealizados": [] }"""
+        prompt = """
+        Analiza esta captura de pantalla de running y devuelve ESTRICTAMENTE un JSON.
+        Estructura:
+        {
+        "datosEstructurados": {
+            "duracionMinutos": int,
+            "rpeSesion": int, 
+            "ejerciciosRealizados": [
+            {
+                "nombreEjercicio": "Running",
+                "distanciaKm": float,
+                "frecuenciaCardiacaMedia": int,
+                "tiempoSegundos": int,
+                "seriesRealizadas": 1,
+                "repeticiones": [],
+                "pesos": []
+            }
+            ]
+        },
+        "mensajeCoach": "string" // Analiza tu ritmo y pulso, y dame un feedback corto sobre tu rendimiento aeróbico.
+        }
+        """
         
         respuesta = modelo.generate_content([prompt, imagen])
         return jsonify(json.loads(respuesta.text.replace("```json", "").replace("```", "").strip()))
@@ -66,21 +85,23 @@ def leer_audio_fitness():
         audio_blob = { "mime_type": "audio/ogg", "data": audio_bytes }
 
         prompt = """
-        Analiza este audio de entrenamiento y devuelve ESTRICTAMENTE un objeto JSON.
-        No incluyas texto explicativo, solo el JSON.
-        Formato:
+        Eres un analista y coach deportivo de élite. Analiza este audio de entrenamiento y devuelve ESTRICTAMENTE un objeto JSON.
+        Formatos:
         {
-          "duracionMinutos": int,
-          "rpeSesion": int,
-          "notas": "string",
-          "ejerciciosRealizados": [
-            {
-              "nombreEjercicio": "string",
-              "seriesRealizadas": int,
-              "repeticionesStr": "string",
-              "pesosStr": "string"
-            }
-          ]
+        "datosEstructurados": {
+            "duracionMinutos": int,
+            "rpeSesion": int,
+            "notas": "string",
+            "ejerciciosRealizados": [
+                {
+                "nombreEjercicio": "string", // IMPORTANTE: Estandariza el nombre (ej. Si dice 'pecho inclinado' usa 'Press Inclinado con Mancuernas')
+                "seriesRealizadas": int,
+                "repeticiones": [int],
+                "pesos": [float]
+                }
+            ]
+        },
+        "mensajeCoach": "string" // Crea un mensaje motivador y analítico de 2 líneas para Telegram resumiendo la sesión, felicitando por los logros o advirtiendo sobre el RPE.
         }
         """
         # ... (puedes dejar el prompt corto para probar) ...
@@ -101,14 +122,77 @@ def leer_audio_fitness():
         traceback.print_exc(file=sys.stderr) # Esto imprimirá el error exacto y la línea donde falló
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8002, debug=True)
-
 # --- RUTA 3: HEALTH CHECK (Para pruebas) ---
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "message": "Agente Fitness activo"}), 200
 
-# --- INICIO DEL SERVIDOR (SIEMPRE AL FINAL) ---
+
+@app.route('/api/ia/fitness/planificar', methods=['POST'])
+def planificar_rutina():
+    print("🗓️ [PLANNER] Generando planificación semanal...")
+    datos = request.get_json()
+    
+    if not datos:
+        return jsonify({"error": "No se recibieron datos"}), 400
+
+    biometria_y_metas = datos.get('contextoEstrategico', '')
+    horarios_usuario = datos.get('horarios', '')
+
+    try:
+        modelo = genai.GenerativeModel('gemini-2.5-flash')
+        
+        prompt = f"""
+        Eres TroxiFit, un planificador de entrenamiento de élite. 
+        Tu objetivo es crear una rutina SEMANAL basada ESTRICTAMENTE en la disponibilidad de tiempo del usuario y alineada con sus metas.
+
+        CONTEXTO DEL USUARIO (Biometría y Metas):
+        {biometria_y_metas}
+
+        DISPONIBILIDAD Y HORARIOS PARA ESTA SEMANA:
+        {horarios_usuario}
+
+        REGLAS:
+        1. Distribuye el volumen de entrenamiento inteligentemente según los días y tiempos que el usuario indicó.
+        2. Si la meta es fuerza (ej. Sentadilla), asegúrate de incluir ejercicios accesorios.
+        3. Si la meta es cardio, programa las distancias o tiempos según la duración permitida.
+        4. DEVUELVE ÚNICAMENTE UN JSON válido.
+
+        ESTRUCTURA DEL JSON (Debe coincidir con las entidades de Java):
+        {{
+          "rutinas": [
+            {{
+              "nombre": "string", // Ej: "Semana 1 - Lunes - Fuerza Piernas"
+              "descripcion": "string", // Ej: "Enfoque en hipertrofia y acercamiento a meta de 100kg en sentadilla. Duración: 1h30m"
+              "tipo": "string", // SOLO PUEDE SER: "FUERZA", "CARDIO", o "HÍBRIDO"
+              "ejercicios": [
+                {{
+                  "nombreEjercicio": "string",
+                  "series": int,
+                  "repeticionesBase": int,
+                  "pesoSugerido": float, // Calcula un peso sugerido basado en la meta
+                  "descansoSegundos": int,
+                  "orden": int // 1, 2, 3...
+                }}
+              ]
+            }}
+          ],
+          "mensajeCoach": "string" // Un mensaje motivador corto confirmando cómo organizaste su semana basándote en sus horarios.
+        }}
+        """
+        
+        print("🧠 Pensando la periodización...")
+        respuesta = modelo.generate_content(prompt)
+        
+        json_limpio = extraer_json_puro(respuesta.text)
+        if json_limpio:
+            return jsonify(json_limpio)
+            
+        return jsonify({"error": "No se pudo extraer JSON estructurado", "raw": respuesta.text}), 500
+
+    except Exception as e:
+        print(f"💥 ERROR EN PLANIFICADOR: {str(e)}", file=sys.stderr, flush=True)
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8002, debug=True)
