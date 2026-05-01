@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import google.generativeai as genai
+from groq import Groq
 import json
 from PIL import Image
 import io
@@ -14,6 +15,42 @@ API_KEY = os.environ.get("GEMINI_API_KEY")
 if not API_KEY:
     print("⚠️ ¡ALERTA! La GEMINI_API_KEY no está configurada.", file=sys.stderr, flush=True)
 genai.configure(api_key=API_KEY)
+
+def generar_respuesta_hibrida(prompt_texto):
+    """
+    Intenta generar la respuesta con Gemini. Si falla (ej. error 429 de Quota),
+    salta automáticamente a la API de Groq usando Llama 3.
+    """
+    try:
+        # Intento 1: Gemini (El modelo principal)
+        print("🤖 [IA] Intentando con Gemini...")
+        modelo_gemini = genai.GenerativeModel('gemini-2.5-flash')
+        respuesta = modelo_gemini.generate_content(prompt_texto)
+        return respuesta.text
+
+    except Exception as e_gemini:
+        print(f"⚠️ [IA] Gemini falló o se quedó sin cuota: {e_gemini}")
+        print("🚀 [IA] Activando Fallback a Groq (Llama 3)...")
+        
+        try:
+            # Intento 2: Groq (El motor de respaldo ultrarrápido)
+            # Usamos llama3-70b-8192 o llama3-8b-8192 que son excelentes para razonar JSON
+            respuesta_groq = cliente_groq.chat.completions.create(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt_texto,
+                    }
+                ],
+                model="llama3-70b-8192", 
+                temperature=0.2
+            )
+            return respuesta_groq.choices[0].message.content
+            
+        except Exception as e_groq:
+            # Si ambos fallan, devolvemos el error para que Java lo maneje
+            print(f"❌ [IA] Falla Crítica en ambos modelos. Groq: {e_groq}")
+            raise Exception("Ambos motores de IA están inaccesibles temporalmente.")
 
 # --- RUTA 1: PROCESAR IMAGEN ---
 @app.route('/api/ia/fitness/leer-imagen', methods=['POST'])
@@ -192,6 +229,42 @@ def planificar_rutina():
 
     except Exception as e:
         print(f"💥 ERROR EN PLANIFICADOR: {str(e)}", file=sys.stderr, flush=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ia/fitness/chat-inteligente', methods=['POST'])
+def chat_inteligente():
+    try:
+        data = request.json
+        mensaje = data.get("mensaje", "")
+        contexto_memoria = data.get("memoria", "")
+        ultima_sesion = data.get("ultima_sesion", "") # El JSON de la sesión anterior
+
+        modelo = genai.GenerativeModel('gemini-2.5-flash')
+        
+        prompt = f"""
+        Eres TroxiFit, el entrenador personal de la usuaria.
+        MENSAJE ACTUAL: "{mensaje}"
+        MEMORIA RECIENTE DE LA CONVERSACIÓN: {contexto_memoria}
+        ÚLTIMA SESIÓN GUARDADA EN LA BD: {ultima_sesion}
+
+        Evalúa qué quiere hacer el usuario y devuelve ESTRICTAMENTE un JSON con este formato:
+        {{
+            "intencion": "CORREGIR_SESION" | "NUEVA_PREFERENCIA" | "CHARLA_NORMAL",
+            "respuesta_telegram": "Lo que le dirás al usuario de forma natural",
+            "datos_corregidos": {{}} // SOLO si es CORREGIR_SESION, devuelve el JSON de la última sesión pero con los valores arreglados. Si no, déjalo vacío.
+        }}
+
+        REGLAS:
+        - Si dice "el 317 eran calorías", cambia la frecuencia cardiaca a null y responde "¡Corregido!".
+        - Si dice "me gusta usar poleas", la intención es NUEVA_PREFERENCIA.
+        - Sé conversacional y empático.
+        """
+        
+        respuesta = modelo.generate_content(prompt)
+        datos = extraer_json_puro(respuesta.text)
+        return jsonify(datos)
+        
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
